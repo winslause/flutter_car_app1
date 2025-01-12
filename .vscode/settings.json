@@ -1,0 +1,4 @@
+{
+    "DockerRun.DisableAutoGenerateConfig": true,
+    "cmake.ignoreCMakeListsMissing": true
+}
