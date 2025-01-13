@@ -1,8 +1,12 @@
+import 'dart:async';
+import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
 import 'package:http/http.dart' as http;
 import 'dart:convert';
+import 'package:geolocator/geolocator.dart';
+import 'package:flutter/scheduler.dart';
 
 void main() => runApp(MyApp());
 
@@ -29,6 +33,89 @@ class _MapAlertScreenState extends State<MapAlertScreen> {
   final TextEditingController _latitudeController = TextEditingController();
   final TextEditingController _longitudeController = TextEditingController();
   String _selectedType = 'pothole';
+  Position? _currentPosition;
+  late StreamSubscription<Position> _positionStream;
+  double? nearestDistance;
+
+  @override
+  void initState() {
+    super.initState();
+    _initializeLocation();
+    Future.delayed(Duration.zero, () => _loadCoordinates());
+  }
+
+  @override
+  void dispose() {
+    _positionStream.cancel();
+    super.dispose();
+  }
+
+  void _initializeLocation() async {
+    bool serviceEnabled;
+    LocationPermission permission;
+
+    serviceEnabled = await Geolocator.isLocationServiceEnabled();
+    if (!serviceEnabled) {
+      return;
+    }
+
+    permission = await Geolocator.checkPermission();
+    if (permission == LocationPermission.denied) {
+      permission = await Geolocator.requestPermission();
+      if (permission == LocationPermission.denied) {
+        return;
+      }
+    }
+
+    if (permission == LocationPermission.deniedForever) {
+      return;
+    }
+
+    _positionStream = Geolocator.getPositionStream(
+      locationSettings: LocationSettings(
+        accuracy: LocationAccuracy.high,
+        distanceFilter: 10,
+      ),
+    ).listen((Position? position) {
+      if (position != null) {
+        _currentPosition = position;
+        _checkProximity();
+        _updateMapPosition();
+        setState(() {});
+      }
+    });
+  }
+
+  void _checkProximity() {
+    if (_currentPosition == null) return;
+    double distanceToNearestPothole = _findNearestDistance(potholeCoordinates);
+    double distanceToNearestBump = _findNearestDistance(bumpCoordinates);
+    double nearestDistance = min(distanceToNearestPothole, distanceToNearestBump);
+
+    setState(() {
+      this.nearestDistance = nearestDistance <= 10 ? nearestDistance : null;
+    });
+  }
+
+  void _updateMapPosition() {
+    if (_currentPosition != null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _mapController.move(LatLng(_currentPosition!.latitude, _currentPosition!.longitude), 16.0);
+      });
+    }
+  }
+
+  double _findNearestDistance(List<LatLng> coordinates) {
+    if (coordinates.isEmpty || _currentPosition == null) return double.infinity;
+    return coordinates.map((coord) {
+      return Geolocator.distanceBetween(
+        _currentPosition!.latitude,
+        _currentPosition!.longitude,
+        coord.latitude,
+        coord.longitude,
+      );
+    }).reduce(min);
+  }
 
   void _zoomToCoordinates() {
     if (potholeCoordinates.isNotEmpty) {
@@ -74,7 +161,7 @@ class _MapAlertScreenState extends State<MapAlertScreen> {
       if (response.statusCode == 200) {
         print("Coordinate added to server");
       } else {
-        print("Coordinate added to server");
+        print("Failed to add coordinate to server");
       }
     } catch (e) {
       print("Error sending data to server: $e");
@@ -103,14 +190,6 @@ class _MapAlertScreenState extends State<MapAlertScreen> {
     } catch (e) {
       print('Error loading coordinates: $e');
     }
-  }
-
-  @override
-  void initState() {
-    super.initState();
-    Future.delayed(Duration.zero, () {
-      _loadCoordinates();
-    });
   }
 
   @override
@@ -152,7 +231,7 @@ class _MapAlertScreenState extends State<MapAlertScreen> {
                   child: FlutterMap(
                     mapController: _mapController,
                     options: MapOptions(
-                      initialCenter: initialCoordinates,
+                      initialCenter: _currentPosition != null ? LatLng(_currentPosition!.latitude, _currentPosition!.longitude) : initialCoordinates,
                       initialZoom: 14.0,
                       initialRotation: 10.0,
                       maxZoom: 20.0,
@@ -190,6 +269,18 @@ class _MapAlertScreenState extends State<MapAlertScreen> {
                               ),
                             ),
                           )).toList(),
+                          if (_currentPosition != null) Marker(
+                            point: LatLng(_currentPosition!.latitude, _currentPosition!.longitude),
+                            width: 80,
+                            height: 80,
+                            child: Container(
+                              child: const Icon(
+                                Icons.location_on,
+                                color: Colors.blue,
+                                size: 40,
+                              ),
+                            ),
+                          ),
                         ],
                       ),
                       const RichAttributionWidget(
@@ -225,7 +316,7 @@ class _MapAlertScreenState extends State<MapAlertScreen> {
                 ),
                 child: Column(
                   children: [
-                    Expanded(child: Center(child: AlertStatusDisplay())),
+                    Expanded(child: Center(child: AlertStatusDisplay(distance: nearestDistance))),
                     
                     // Card for Manual Coordinate Input with Dropdown
                     Card(
@@ -280,41 +371,42 @@ class _MapAlertScreenState extends State<MapAlertScreen> {
 }
 
 class AlertStatusDisplay extends StatelessWidget {
+  final double? distance;
+
+  const AlertStatusDisplay({Key? key, this.distance}) : super(key: key);
+
   @override
   Widget build(BuildContext context) {
     return Column(
       mainAxisAlignment: MainAxisAlignment.center,
       crossAxisAlignment: CrossAxisAlignment.center,
       children: [
-        Container(
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-          decoration: BoxDecoration(
-            color: Colors.yellow,
-            borderRadius: BorderRadius.circular(12),
-          ),
-          child: const Text(
-            "50m rem",
-            style: TextStyle(
-              fontSize: 24,
-              fontWeight: FontWeight.bold,
-              color: Colors.black,
+        if (distance != null)
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+            decoration: BoxDecoration(
+              color: Colors.red,
+              borderRadius: BorderRadius.circular(12),
+            ),
+            child: Text(
+              "${distance!.toStringAsFixed(1)}m rem",
+              style: const TextStyle(
+                fontSize: 24,
+                fontWeight: FontWeight.bold,
+                color: Colors.white,
+              ),
             ),
           ),
-        ),
         const SizedBox(height: 16),
-        const Text(
-          "Pothole or Bump Ahead!!",
+        Text(
+          distance != null ? "Pothole or Bump Ahead!!" : "No Alerts",
           style: TextStyle(
-              fontSize: 24, fontWeight: FontWeight.bold, color: Colors.yellow),
-        ),
-        const SizedBox(height: 16),
-        Container(
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-          decoration: BoxDecoration(
-            color: Colors.grey[800],
-            borderRadius: BorderRadius.circular(12),
+            fontSize: 24,
+            fontWeight: FontWeight.bold,
+            color: distance != null ? Colors.red : Colors.grey,
           ),
         ),
+        // ... other widgets ...
       ],
     );
   }
